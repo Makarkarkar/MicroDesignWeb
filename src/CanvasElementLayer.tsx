@@ -14,6 +14,7 @@ interface Element {
     orientation: string;
     groupId?: string;
     combinedElementId?: string; // ← Добавить
+    points?: { index: number; x: number; y: number }[];
 }
 
 
@@ -23,11 +24,20 @@ interface Props {
     visibleLayers: string[];
     draggingId: string | null;
     setDraggingId: (id: string | null) => void;
+    updateElements: (newElements: Element[]) => void;
     setElements: React.Dispatch<React.SetStateAction<Element[]>>;
     layerColors: Record<string, string>;
     selectedIds: string[];
     setSelectedIds: React.Dispatch<React.SetStateAction<string[]>>;
     setEditingGroupId: (id: string | null) => void;
+    canvasScale: number
+    polygonMode: boolean;
+    polygonPointsRequired: number;
+    setPolygonMode: (val: boolean) => void;
+    setPolygonPointsRequired: (value: number) => void;
+    tempPolygonPoints: { x: number; y: number }[];
+    setTempPolygonPoints: React.Dispatch<React.SetStateAction<{ x: number; y: number }[]>>;
+
 }
 
 const CanvasElementLayer: React.FC<Props> = ({
@@ -36,11 +46,19 @@ const CanvasElementLayer: React.FC<Props> = ({
     visibleLayers,
     draggingId,
     setDraggingId,
+    updateElements,
     setElements,
     layerColors,
     selectedIds,
     setSelectedIds,
-    setEditingGroupId
+    setEditingGroupId,
+    canvasScale,
+    polygonMode,
+    polygonPointsRequired,
+    setPolygonMode,
+    setPolygonPointsRequired,
+    tempPolygonPoints,
+    setTempPolygonPoints
 
 }) => {
     const isResizingRef = useRef(false);
@@ -49,16 +67,36 @@ const CanvasElementLayer: React.FC<Props> = ({
     const lastMousePosRef = useRef<{ x: number, y: number } | null>(null);
     const isDraggingRef = useRef(false);
     const resizeHandleSize = 2;
-    const GRID_SIZE = 1;
-    const CANVAS_SCALE = 2;
-    const initialPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+    const GRID_SIZE = 5;
+    const CANVAS_SCALE = 5;
+    const initialPositionsRef = useRef<Record<string, {
+        x: number;
+        y: number;
+        x2?: number;
+        y2?: number;
+        points?: { index: number; x: number; y: number }[];
+    }>>({});
+
     const newCombinedIdMap = new Map<string | undefined, string>();
     const layerOpacities: Record<string, number> = {
         M1: 1, M2: 0.9, TM1: 0.85, TM2: 0.85, NA: 0.8, P: 0.8,
         CNE: 0.75, SI: 0.75, CPA: 0.7, CPE: 0.7, SN: 0.65, CNA: 0.65,
         KP: 0.6, KN: 0.6, SPK: 0.55, CM: 0.5, CW: 0.45, M3: 0.4, CSI: 0.3, POLY: 0.2, N: 0.2
     };
-    const dragModeRef = useRef<"MOVE_ALL" | "MOVE_P1" | "MOVE_P2" | null>(null);
+    const dragModeRef = useRef<"MOVE_ALL" | "MOVE_P1" | "MOVE_P2" | `MOVE_POINT_${number}` | null>(null);
+
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const isPanningRef = useRef(false);
+    const panStartRef = useRef<{ x: number; y: number } | null>(null);
+    const initialElementsRef = useRef<Element[] | null>(null);
+    const elementsRef = useRef<Element[]>(elements);
+    const [polygonPoints, setPolygonPoints] = useState<{ x: number; y: number }[]>([]);
+    const polygonPointsRef = useRef<{ x: number; y: number }[]>([]);
+
+
+    useEffect(() => {
+        elementsRef.current = elements;
+    }, [elements]);
 
     function isPointNearLine(px: number, py: number, x1: number, y1: number, x2: number, y2: number, tolerance = 6): boolean {
         const dx = x2 - x1;
@@ -74,6 +112,18 @@ const CanvasElementLayer: React.FC<Props> = ({
         const dist = Math.hypot(px - projX, py - projY);
 
         return dist <= tolerance;
+    }
+    function isPointInPolygon(x: number, y: number, points: { x: number; y: number }[]): boolean {
+        let inside = false;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+            const xi = points[i].x, yi = points[i].y;
+            const xj = points[j].x, yj = points[j].y;
+
+            const intersect = ((yi > y) !== (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / (yj - yi + 0.00001) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
     }
 
 
@@ -169,7 +219,8 @@ const CanvasElementLayer: React.FC<Props> = ({
             const height = canvas.height;
             ctx.clearRect(0, 0, width, height);
             ctx.save();
-            ctx.scale(CANVAS_SCALE, CANVAS_SCALE);
+            ctx.scale(canvasScale, canvasScale);
+            ctx.translate(offset.x, offset.y);
 
             ctx.strokeStyle = "#e5e7eb";
             ctx.lineWidth = 1;
@@ -227,6 +278,27 @@ const CanvasElementLayer: React.FC<Props> = ({
                     return;
                 }
 
+                if (el.points && el.points.length >= 2) {
+                    ctx.beginPath();
+                    el.points.forEach((pt, idx) => {
+                        if (idx === 0) ctx.moveTo(pt.x, pt.y);
+                        else ctx.lineTo(pt.x, pt.y);
+                    });
+                    ctx.closePath();
+                    ctx.fillStyle = baseColor;
+                    ctx.fill();
+
+                    if (selectedIds.includes(el.id)) {
+                        ctx.strokeStyle = "#2563eb";
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                    }
+
+                    ctx.globalAlpha = 1.0;
+                    ctx.lineWidth = 1;
+                    return;
+                }
+
                 // 🟦 Прямоугольный элемент
                 const { x: drawX, y: drawY, width: drawWidth, height: drawHeight } = getDrawRect(el);
                 ctx.fillStyle = baseColor;
@@ -249,14 +321,71 @@ const CanvasElementLayer: React.FC<Props> = ({
         const getMousePos = (e: MouseEvent) => {
             const rect = canvas.getBoundingClientRect();
             return {
-                x: (e.clientX - rect.left) / CANVAS_SCALE,
-                y: (e.clientY - rect.top) / CANVAS_SCALE
+                x: (e.clientX - rect.left) / canvasScale,
+                y: (e.clientY - rect.top) / canvasScale
             };
         };
 
         const handleMouseDown = (e: MouseEvent) => {
             if (e.button === 2) return;
             const { x, y } = getMousePos(e);
+
+            if (polygonMode) {
+                const point = { x, y };
+                setTempPolygonPoints(prev => {
+                    const updated = [...prev, point];
+
+                    if (updated.length === polygonPointsRequired) {
+                        const newId = uuidv4();
+
+                        let newElement: Element;
+
+                        if (updated.length === 2) {
+                            const [p1, p2] = updated;
+                            newElement = {
+                                id: newId,
+                                name: "Line",
+                                type: "M1",
+                                x: p1.x,
+                                y: p1.y,
+                                x2: p2.x,
+                                y2: p2.y,
+                                width: 2,
+                                height: 2,
+                                orientation: "EAST",
+                                combinedElementId: newId
+                            };
+                        } else {
+                            newElement = {
+                                id: newId,
+                                name: "Polygon",
+                                type: "M1",
+                                x: updated[0].x,
+                                y: updated[0].y,
+                                width: 0,
+                                height: 0,
+                                orientation: "EAST",
+                                points: updated.map((pt, i) => ({ ...pt, index: i })),
+                                combinedElementId: newId
+                            };
+                        }
+
+                        const finalElements = [...elementsRef.current, newElement];
+                        setElements(finalElements);         // 👈 важно
+                        updateElements(finalElements, true); // 👈 явное добавление в историю
+
+
+                        setPolygonMode(false);
+                        setPolygonPointsRequired(2);
+                        return [];
+                    }
+
+                    return updated;
+                });
+
+                return;
+            }
+
 
             for (const el of [...elements].reverse()) {
                 const { x: drawX, y: drawY, width: drawWidth, height: drawHeight } = getDrawRect(el);
@@ -272,10 +401,50 @@ const CanvasElementLayer: React.FC<Props> = ({
                     return;
                 }
             }
+            if (e.button === 1) {
+                isPanningRef.current = true;
+                panStartRef.current = { x: e.clientX, y: e.clientY };
+                e.preventDefault(); // предотвращаем прокрутку
+                return;
+            }
+            for (const el of [...elements].reverse()) {
+                if (el.points) {
+                    for (let i = 0; i < el.points.length; i++) {
+                        const pt = el.points[i];
+                        const radius = 6;
+                        if (
+                            x >= pt.x - radius &&
+                            x <= pt.x + radius &&
+                            y >= pt.y - radius &&
+                            y <= pt.y + radius
+                        ) {
+                            console.log(`🎯 Клик по точке #${i} полигона ${el.id}`);
+                            setSelectedIds([el.id]);
+                            setEditingGroupId(el.combinedElementId || el.id);
+                            setDraggingId(el.id);
+                            isDraggingRef.current = true;
+                            lastMousePosRef.current = { x, y };
+                            dragModeRef.current = `MOVE_POINT_${i}`; // 👈 сохраняем индекс точки
+                            initialElementsRef.current = elements.map(e => ({ ...e }));
+                            // сохраняем начальные позиции точек
+                            initialPositionsRef.current = {
+                                [el.id]: {
+                                    points: el.points.map(pt => ({ ...pt }))
+                                }
+                            };
+                            return;
+                        }
+                    }
+                }
+            }
 
             const hit = [...elements]
                 .filter(el => visibleLayers.includes(el.type))
                 .find(el => {
+                    if (el.points && el.points.length >= 3) {
+                        return isPointInPolygon(x, y, el.points);
+                    }
+
                     if (el.x2 !== undefined && el.y2 !== undefined) {
                         return isPointNearLine(x, y, el.x, el.y, el.x2, el.y2);
                     } else {
@@ -283,6 +452,7 @@ const CanvasElementLayer: React.FC<Props> = ({
                         return x >= drawX && x <= drawX + drawWidth && y >= drawY && y <= drawY + drawHeight;
                     }
                 });
+
 
             if (hit) {
                 const group = hit.combinedElementId
@@ -303,6 +473,8 @@ const CanvasElementLayer: React.FC<Props> = ({
                 setDraggingId(hit.id);
                 isDraggingRef.current = true;
                 lastMousePosRef.current = { x, y };
+                initialElementsRef.current = elements.map(el => ({ ...el })); // 👈 глубокая копия
+                console.log("💾 Saved initialElementsRef", initialElementsRef.current);
 
                 // 🎯 Определяем dragModeRef для линий
                 if (hit.x2 !== undefined && hit.y2 !== undefined) {
@@ -324,9 +496,19 @@ const CanvasElementLayer: React.FC<Props> = ({
                 initialPositionsRef.current = {};
                 elements.forEach(el => {
                     if (newSelection.includes(el.id)) {
-                        initialPositionsRef.current[el.id] = { x: el.x, y: el.y, x2: el.x2, y2: el.y2 };
+                        initialPositionsRef.current[el.id] = {
+                            x: el.x,
+                            y: el.y,
+                            x2: el.x2,
+                            y2: el.y2,
+                            points: el.points ? el.points.map(pt => ({ ...pt })) : undefined
+                        };
                     }
                 });
+            }
+            else {
+                setSelectedIds([]);
+                setEditingGroupId(null);
             }
         }
 
@@ -343,6 +525,18 @@ const CanvasElementLayer: React.FC<Props> = ({
                 );
             });
             if (canvas) canvas.style.cursor = overResize ? "nwse-resize" : "default";
+            if (isPanningRef.current && panStartRef.current) {
+                const dx = e.clientX - panStartRef.current.x;
+                const dy = e.clientY - panStartRef.current.y;
+
+                setOffset(prev => ({
+                    x: prev.x + dx / canvasScale,
+                    y: prev.y + dy / canvasScale,
+                }));
+
+                panStartRef.current = { x: e.clientX, y: e.clientY };
+                return;
+            }
 
             // 🔁 Изменение размеров (resize)
             if (isResizingRef.current && resizingIdRef.current !== null) {
@@ -425,6 +619,45 @@ const CanvasElementLayer: React.FC<Props> = ({
                             };
                         }
                     }
+                    if (Array.isArray(el.points) && el.points.length > 0) {
+                        const initialPoly = initialPositionsRef.current[el.id];
+                        if (!initialPoly?.points) return el;
+
+                        const movePointIndex = dragModeRef.current?.startsWith("MOVE_POINT_")
+                            ? parseInt(dragModeRef.current.split("_")[2], 10)
+                            : null;
+
+                        if (movePointIndex !== null && !isNaN(movePointIndex)) {
+                            // Перемещаем только одну точку
+                            const movedPoints = el.points.map((pt, i) => {
+                                if (i === movePointIndex) {
+                                    const base = initialPoly.points![i];
+                                    return { ...pt, x: base.x + dx, y: base.y + dy };
+                                }
+                                return pt;
+                            });
+
+                            return {
+                                ...el,
+                                points: movedPoints
+                            };
+                        } else {
+                            // Перемещаем все точки
+                            const movedPoints = el.points.map((pt, i) => {
+                                const base = initialPoly.points![i];
+                                return base ? { ...pt, x: base.x + dx, y: base.y + dy } : pt;
+                            });
+
+                            return {
+                                ...el,
+                                x: movedPoints[0].x,
+                                y: movedPoints[0].y,
+                                points: movedPoints
+                            };
+                        }
+                    }
+
+
 
                     // 🔁 Прямоугольник
                     return {
@@ -440,10 +673,33 @@ const CanvasElementLayer: React.FC<Props> = ({
         const handleMouseUp = () => {
             setDraggingId(null);
             isDraggingRef.current = false;
+
+            const initial = initialElementsRef.current;
+            initialElementsRef.current = null;
+
             isResizingRef.current = false;
             resizingIdRef.current = null;
             lastMousePosRef.current = null;
+            isPanningRef.current = false;
+            panStartRef.current = null;
+
+            const currentElements = elementsRef.current;
+
+            if (initial) {
+                console.log("📦 Initial elements:", initial);
+                console.log("📦 Current elements:", currentElements);
+                const changed = JSON.stringify(initial) !== JSON.stringify(currentElements);
+                if (changed) {
+                    console.log("📝 Change detected — pushing to history");
+                    updateElements(currentElements, true); // ✅ главное изменение
+                } else {
+                    console.log("⛔ No changes — not saved to history");
+                }
+            }
+
         };
+
+
 
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.ctrlKey && e.key === "c" && selectedIds.length > 0) {
@@ -468,13 +724,15 @@ const CanvasElementLayer: React.FC<Props> = ({
                         y: el.y + offset
                     };
                 });
-                setElements(prev => [...prev, ...pasted]);
+                const updated = [...elements, ...pasted]; // 1️⃣ создаём новое состояние
+                setElements(updated);                     // 2️⃣ обновляем напрямую
+                updateElements(updated, true);            // 3️⃣ явно записываем в историю
                 setSelectedIds(pasted.map(el => el.id));
             } else if ((e.key === "Delete" || e.key === "Backspace") && selectedIds.length > 0) {
-                setElements(prev => prev.filter(el => !selectedIds.includes(el.id)));
+                updateElements(prev => prev.filter(el => !selectedIds.includes(el.id)));
                 setSelectedIds([]);
             } else if (e.key.toLowerCase() === "r" && selectedIds.length > 0) {
-                setElements(prev => {
+                updateElements(prev => {
                     // найдём все связанные combinedElementId
                     const combinedIds = new Set(
                         prev.filter(e => selectedIds.includes(e.id) && e.combinedElementId)
@@ -505,7 +763,7 @@ const CanvasElementLayer: React.FC<Props> = ({
             canvas.removeEventListener("mouseup", handleMouseUp);
             window.removeEventListener("keydown", handleKeyDown);
         };
-    }, [elements, draggingId, visibleLayers, selectedIds]);
+    }, [elements, draggingId, visibleLayers, selectedIds, canvasScale, offset]);
 
     return null;
 };

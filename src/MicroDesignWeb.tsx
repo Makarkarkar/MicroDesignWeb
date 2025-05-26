@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, } from "react";
 import LayerVisibilityMenu from "./ControlPanels/LayerVisibilityMenu";
 import CanvasElementLayer from "./CanvasElementLayer";
 import LayerButtonPanel from "./ControlPanels/LayerButtonPanel";
@@ -6,6 +6,7 @@ import LayerColorSettings from "./ControlPanels/LayerColorSettings";
 import { v4 as uuidv4 } from "uuid";
 import { expandTPElement } from "./utils/expandTP";
 import { expandTNElement } from "./utils/expandTN";
+import { useUndoableElements } from "./utils/useUndoableElements";
 
 
 
@@ -22,6 +23,7 @@ interface Element {
     orientation: string;
     groupId?: string;
     combinedElementId?: string; // ← Добавить
+    points?: { index: number; x: number; y: number }[];
 }
 
 
@@ -31,10 +33,18 @@ interface MacroBlock {
 }
 
 export default function MicroDesignWeb() {
-    const [elements, setElements] = useState<Element[]>(() => {
-        const saved = localStorage.getItem("microdesign-elements");
-        return saved ? JSON.parse(saved) : [];
-    });
+    const [canvasScale, setCanvasScale] = useState(2);
+    const {
+        elements,
+        setElements,
+        updateElements,
+        undo,
+        redo,
+        canUndo,
+        canRedo
+    } = useUndoableElements([]);
+
+
     const [macroLibrary, setMacroLibrary] = useState<MacroBlock[]>(() => {
         const saved = localStorage.getItem("microdesign-schema");
         if (saved) {
@@ -48,12 +58,13 @@ export default function MicroDesignWeb() {
         return [];
     });
     const updateElement = (id: string, changes: Partial<Element>) => {
-        setElements(prev =>
+        updateElements(prev =>
             prev.map(el =>
                 el.id === id ? { ...el, ...changes } : el
             )
         );
     };
+
     const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
     const layers = [
         "M1", "M2", "TM1", "TM2", "NA", "P", "CNE", "SI", "CPA",
@@ -146,12 +157,15 @@ export default function MicroDesignWeb() {
     const [visibleLayers, setVisibleLayers] = useState<string[]>([...layers]);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [codeInput, setCodeInput] = useState("");
+    const [polygonMode, setPolygonMode] = useState(false);
+    const [polygonPointsRequired, setPolygonPointsRequired] = useState(2);
+    const [tempPolygonPoints, setTempPolygonPoints] = useState<{ x: number; y: number }[]>([]);
     useEffect(() => {
         const saved = localStorage.getItem("microdesign-schema");
         if (saved) {
             try {
                 const data = JSON.parse(saved);
-                if (Array.isArray(data.elements)) setElements(data.elements);
+                if (Array.isArray(data.elements)) updateElements(data.elements);
                 if (Array.isArray(data.macroLibrary)) setMacroLibrary(data.macroLibrary);
                 console.log("✅ Загружено из localStorage:", data);
             } catch (err) {
@@ -174,9 +188,42 @@ export default function MicroDesignWeb() {
     }, [elements]);
     const addElement = (type: string) => {
         const newId = uuidv4();
-        setElements(prev => [...prev, { id: newId, type, x: 100, y: 100, width: 40, height: 20, orientation: "EAST", combinedElementId: newId }]);
-        setNextId(prev => prev + 1);
+        const newElement = {
+            id: newId,
+            type,
+            x: 100,
+            y: 100,
+            width: 40,
+            height: 20,
+            orientation: "EAST",
+            combinedElementId: newId,
+        };
+
+        // 1️⃣ Сначала создаём новое состояние
+        const updated = [...elements, newElement];
+
+        // 2️⃣ Обновляем state
+        setElements(updated);
+
+        // 3️⃣ Принудительно сохраняем новое состояние в историю
+        updateElements(updated, true);
     };
+
+
+
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.ctrlKey && e.key.toLowerCase() === "z") {
+                e.preventDefault();
+                e.shiftKey ? redo() : undo();
+            } else if (e.ctrlKey && e.key.toLowerCase() === "y") {
+                e.preventDefault();
+                redo();
+            }
+        };
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [undo, redo]);
 
     const toggleLayer = (layer: string) => {
         setVisibleLayers(prev =>
@@ -206,7 +253,7 @@ export default function MicroDesignWeb() {
         });
 
         if (newElements.length > 0) {
-            setElements((prev) => [...prev, ...newElements]);
+            updateElements((prev) => [...prev, ...newElements]);
             setNextId((prev) => prev + newElements.length);
             setCodeInput("");
         }
@@ -220,8 +267,8 @@ export default function MicroDesignWeb() {
         const lines = text.split(/\r?\n/);
         const elements: Element[] = [];
 
-        let currentWidth = 1.0;
-        let currentHeight = 1.0;
+        let currentWidth = 0.2;
+        let currentHeight = 0.2;
         let currentOrientation = "EAST";
 
         for (let i = 0; i < lines.length; i++) {
@@ -247,16 +294,17 @@ export default function MicroDesignWeb() {
                 const y = parseFloat(yStr) * 10;
                 const width = currentWidth * 10;
                 const height = currentHeight * 10;
-
+                const newId = crypto.randomUUID();
                 elements.push({
-                    id: crypto.randomUUID(),
+                    id: newId,
                     name,
                     type: name,
                     x,
                     y,
                     width,
                     height,
-                    orientation: currentOrientation
+                    orientation: currentOrientation,
+                    combinedElementId: newId
                 });
                 continue;
             }
@@ -429,7 +477,7 @@ export default function MicroDesignWeb() {
 
                 <button
                     onClick={() => {
-                        setElements([]);
+                        updateElements([]);
                         localStorage.removeItem("microdesign-elements");
                     }}
                     className="font-extrabold mb-4 ml-4 px-4 py-2 text-sm rounded bg-red-600 hover:bg-red-700 text-white shadow"
@@ -477,44 +525,77 @@ export default function MicroDesignWeb() {
                         link.click();
                         URL.revokeObjectURL(url);
                     }}
-                    className="ml-2 px-4 py-2 text-sm rounded bg-yellow-600 hover:bg-yellow-700 text-white shadow"
+                    className="font-extrabold  ml-2 px-4 py-2 text-sm rounded bg-yellow-600 hover:bg-yellow-700 text-white shadow"
                 >
                     Сохранить схему
                 </button>
                 <div className="ml-2 relative inline-block">
-                    <label
-                        htmlFor="import-scheme"
-                        className="cursor-pointer px-4 py-2 text-sm rounded bg-indigo-600 hover:bg-indigo-700 text-white shadow"
-                    >
-                        Импорт схемы
-                    </label>
-                    <input
-                        id="import-scheme"
-                        type="file"
-                        accept="application/json"
-                        onChange={async (e) => {
-                            const file = e.target.files?.[0];
-                            if (!file) return;
-
-                            const text = await file.text();
-                            try {
-                                const data = JSON.parse(text);
-                                if (Array.isArray(data.elements)) setElements(data.elements);
-                                if (Array.isArray(data.macroLibrary)) setMacroLibrary(data.macroLibrary);
-                                alert("Схема успешно загружена!");
-                            } catch (err) {
-                                alert("Ошибка при загрузке схемы: " + err);
-                            }
-                        }}
-                        className="hidden"
-                    />
-                </div>
-                <div className="ml-2 relative inline-block">
-                    <label className="cursor-pointer px-4 py-2 text-sm rounded bg-pink-600 hover:bg-pink-700 text-white shadow">
+                    <label className="font-extrabold  cursor-pointer px-4 py-2 text-sm rounded bg-pink-600 hover:bg-pink-700 text-white shadow">
                         Импорт .cpp
                         <input type="file" accept=".cpp" onChange={handleCppImport} className="hidden" />
                     </label>
                 </div>
+                <button
+                    onClick={() => {
+                        setPolygonMode(true);
+                        setPolygonPointsRequired(Math.max(2, Math.min(10, polygonPointsRequired)));
+                        alert("👆 Кликните на канвасе для указания точек фигуры");
+                    }}
+                    className="font-extrabold  ml-2 px-4 py-2 bg-green-700 text-white rounded hover:bg-green-800"
+                >
+                    Вставить фигуру по точкам
+                </button>
+
+                <input
+                    type="number"
+                    min={2}
+                    max={10}
+                    value={polygonPointsRequired}
+                    onChange={(e) => setPolygonPointsRequired(Number(e.target.value))}
+                    className="w-16 p-1 bg-zinc-800 text-white border border-gray-400 text-sm ml-2"
+                />
+                <button
+                    onClick={() => {
+                        if (selectedIds.length < 2) {
+                            alert("Выделите как минимум два элемента.");
+                            return;
+                        }
+
+                        const newCombinedId = uuidv4();
+
+                        const updated = elements.map(el =>
+                            selectedIds.includes(el.id)
+                                ? { ...el, combinedElementId: newCombinedId }
+                                : el
+                        );
+
+                        setElements(updated);         // Обновляем напрямую
+                        updateElements(updated, true); // Сохраняем в историю
+                    }}
+                    className="font-extrabold  ml-2 px-4 py-2 text-sm rounded bg-purple-600 hover:bg-purple-700 text-white shadow"
+                >
+                    Объединить
+                </button>
+                <button
+                    onClick={() => {
+                        if (selectedIds.length === 0) {
+                            alert("Выделите элементы для разъединения.");
+                            return;
+                        }
+
+                        const updated = elements.map(el =>
+                            selectedIds.includes(el.id)
+                                ? { ...el, combinedElementId: el.id }
+                                : el
+                        );
+
+                        setElements(updated);         // Обновляем напрямую
+                        updateElements(updated, true); // Сохраняем в историю
+                    }}
+                    className="font-extrabold  ml-2 px-4 py-2 text-sm rounded bg-indigo-600 hover:bg-indigo-700 text-white shadow"
+                >
+                    Разъединить
+                </button>
 
                 <div className="flex items-center gap-2 my-4">
                     <label className="ml-4 text-sm text-white font-extrabold">Вставить макроблок:</label>
@@ -534,15 +615,37 @@ export default function MicroDesignWeb() {
                                 y: el.y + offset
                             }));
 
-                            setElements(prev => [...prev, ...pasted]);
+                            const updated = [...elements, ...pasted]; // 1️⃣ Вычисляем новое состояние
+                            setElements(updated);                     // 2️⃣ Обновляем напрямую
+                            updateElements(updated, true);            // 3️⃣ Явно записываем в историю
                         }}
-                        className=" bg-zinc-900 rounded px-2 py-1 text-sm"
+                        className="bg-zinc-900 rounded px-2 py-1 text-sm"
                     >
                         <option>Выберите макроблок</option>
                         {macroLibrary.map(block => (
                             <option key={block.name} value={block.name}>{block.name}</option>
                         ))}
                     </select>
+                </div>
+
+                <div className="flex items-center justify-start gap-2 mb-2 ml-2">
+                    <button
+                        onClick={undo}
+                        disabled={!canUndo}
+                        className={`px-3 py-1 rounded text-sm font-medium shadow ${canUndo ? "bg-zinc-700 text-white hover:bg-zinc-600" : "bg-zinc-800 text-gray-400 cursor-not-allowed"
+                            }`}
+                    >
+                        ↺ Отменить
+                    </button>
+
+                    <button
+                        onClick={redo}
+                        disabled={!canRedo}
+                        className={`px-3 py-1 rounded text-sm font-medium shadow ${canRedo ? "bg-zinc-700 text-white hover:bg-zinc-600" : "bg-zinc-800 text-gray-400 cursor-not-allowed"
+                            }`}
+                    >
+                        ↻ Повторить
+                    </button>
                 </div>
 
                 <div className="w-full flex justify-center bg-zinc-900">
@@ -553,11 +656,20 @@ export default function MicroDesignWeb() {
                             visibleLayers={visibleLayers}
                             draggingId={draggingId}
                             setDraggingId={setDraggingId}
-                            setElements={setElements}
+                            updateElements={updateElements}
                             layerColors={layerColors}
                             selectedIds={selectedIds}
                             setSelectedIds={setSelectedIds}
                             setEditingGroupId={setEditingGroupId}
+                            canvasScale={canvasScale}
+                            setElements={setElements}
+                            polygonMode={polygonMode}
+                            polygonPointsRequired={polygonPointsRequired}
+                            setPolygonMode={setPolygonMode}
+                            polygonPointsRequired={polygonPointsRequired}
+                            setPolygonPointsRequired={setPolygonPointsRequired}
+                            tempPolygonPoints={tempPolygonPoints}
+                            setTempPolygonPoints={setTempPolygonPoints}
                         />
                         <canvas
                             ref={canvasRef}
@@ -577,7 +689,21 @@ export default function MicroDesignWeb() {
                                 Добавить из кода
                             </button>
                         </div>
-
+                        <div className="flex items-center gap-2 mt-4">
+                            <button
+                                onClick={() => setCanvasScale(prev => Math.max(0.5, prev - 0.5))}
+                                className="px-3 py-1 text-lg bg-gray-700 text-white rounded hover:bg-gray-600"
+                            >
+                                −
+                            </button>
+                            <span className="text-white text-sm">{canvasScale.toFixed(1)}x</span>
+                            <button
+                                onClick={() => setCanvasScale(prev => prev + 0.5)}
+                                className="px-3 py-1 text-lg bg-gray-700 text-white rounded hover:bg-gray-600"
+                            >
+                                +
+                            </button>
+                        </div>
                     </div>
                 </div>
 
